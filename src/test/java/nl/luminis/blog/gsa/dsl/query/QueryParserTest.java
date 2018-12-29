@@ -272,11 +272,10 @@ public class QueryParserTest {
 
     @Test
     public void testRangeQuery() {
-        QueryBuilder builder = parser.visit("inmeta:latitude:52.081719..53.081719 inmeta:longitude:4.889763..5.889763");
+        QueryBuilder builder = parser.visit("inmeta:year:1970..1975");
         assertThat(builder).isEqualTo(
                 boolQuery()
-                        .must(new RangeQueryBuilder("latitude").gte("52.081719").lte("53.081719"))
-                        .must(new RangeQueryBuilder("longitude").gte("4.889763").lte("5.889763")));
+                        .must(new RangeQueryBuilder("year").gte("1970").lte("1975")));
     }
 
     private MultiMatchQueryBuilder freeTextQuery(String terms) {

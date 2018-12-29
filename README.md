@@ -197,14 +197,15 @@ In my repository, I've included a REST controller that can be used to execute qu
 Execute the following steps to follow along with the examples below:
 
 * Start an Elasticsearch instance at <http://localhost:9200>
+* Clone the repository: `git clone https://github.com/markkrijgsman/migrate-gsa-to-elasticsearch.git && cd migrate-gsa-to-elasticsearch`
 * Compile the repository: `mvn clean install`
 * Run the application: `cd target && java -jar search-api.jar`
 * Fill the Elasticsearch instance with some documents: <http://localhost:8080/load>
 * Start searching: <http://localhost:8080/search>
 
-You can also use the Swagger UI to execute some requests: <http://localhost:8080/swagger-ui.html>
+You can also use the Swagger UI to execute some requests: <http://localhost:8080/swagger-ui.html>. For each example I will list the URL for the request and the resulting Elasticsearch query that is constructed by the application.
 
-**Get all documents mentioning Elton John**
+**Get all albums mentioning Elton John**
 <http://localhost:8080/search?q=Elton>
 
     GET rolling500/_search
@@ -233,7 +234,7 @@ You can also use the Swagger UI to execute some requests: <http://localhost:8080
       }
     }
 
-**Get all documents where Elton John or Frank Sinatra are mentioned**
+**Get all albums where Elton John or Frank Sinatra are mentioned**
 <http://localhost:8080/search?q=allintext:Elton%20OR%20Sinatra>
 
     GET rolling500/_search
@@ -270,7 +271,7 @@ You can also use the Swagger UI to execute some requests: <http://localhost:8080
 
 Note that the operator for the multi match query is now OR, where it was AND in the previous example.
 
-**Get all documents where the artist is Elton John**
+**Get all albums where the artist is Elton John**
 <http://localhost:8080/search?partialFields=(artist:Elton)>
 
     GET rolling500/_search
@@ -291,7 +292,7 @@ Note that the operator for the multi match query is now OR, where it was AND in 
       }
     }
 
-**Get all documents where Elton John is mentioned, but is not the artist**
+**Get all albums where Elton John is mentioned, but is not the artist**
 <http://localhost:8080/search?partialFields=(-artist:Elton)&q=Elton>
 
     GET rolling500/_search
@@ -333,12 +334,68 @@ Note that the operator for the multi match query is now OR, where it was AND in 
         }
       }
     }
+    
+**Get all albums created by Elton John between 1972 and 1974 for the label MCA**
+<http://localhost:8080/search?partialFields=(artist:Elton).(label:MCA)&q=inmeta:year:1972..1974>    
+
+    GET rolling500/_search
+    {
+      "query": {
+        "bool": {
+          "must": [
+            {
+              "bool": {
+                "must": [
+                  {
+                    "match": {
+                      "artist": {
+                        "query": "Elton",
+                        "operator": "AND"
+                      }
+                    }
+                  },
+                  {
+                    "match": {
+                      "label": {
+                        "query": "MCA",
+                        "operator": "AND"
+                      }
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "bool": {
+                "must": [
+                  {
+                    "range": {
+                      "year": {
+                        "from": "1972",
+                        "to": "1974",
+                        "include_lower": true,
+                        "include_upper": true
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      }
+    }
+
+Please refer to the unittests for a lot more examples:
+
+* [Unittest examples for DSL q][7]
+* [Unittest examples for DSL partialFields][8]
 
 ### Conclusions
 
 As you can see, the usage of ANTLR allows us to specify fairly complex DSL's without compromising readability. We've cleanly separated the parsing of a user query from the actual construction of the resulting Elasticsearch query. All code is easily testable and makes little to no use of hard to understand regular expressions. 
 
-A good addition would be to add some integration tests to your implementation, which you can learn more about [here][7]. If you have any questions or comments, let me know! 
+A good addition would be to add some integration tests to your implementation, which you can learn more about [here][9]. If you have any questions or comments, let me know! 
 
 [1]: https://www.google.com/support/enterprise/static/gsa/docs/admin/current/gsa_doc_set/xml_reference/index.html
 [2]: https://www.google.com/support/enterprise/static/gsa/docs/admin/current/gsa_doc_set/xml_reference/request_format.html#1077914
@@ -346,4 +403,6 @@ A good addition would be to add some integration tests to your implementation, w
 [4]: https://amsterdam.luminis.eu/2017/07/21/creating-search-dsl-part-2
 [5]: https://github.com/markkrijgsman/migrate-gsa-to-elasticsearch
 [6]: https://github.com/markkrijgsman/migrate-gsa-to-elasticsearch/tree/master/src/main/java/nl/luminis/blog/gsa/dsl/partialfields/PartialFieldsVisitor.java
-[7]: https://amsterdam.luminis.eu/2018/08/20/elasticsearch-instances-for-integration-testing/
+[7]: https://github.com/markkrijgsman/migrate-gsa-to-elasticsearch/blob/master/src/test/java/nl/luminis/blog/gsa/dsl/query/QueryParserTest.java
+[8]: https://github.com/markkrijgsman/migrate-gsa-to-elasticsearch/blob/master/src/test/java/nl/luminis/blog/gsa/dsl/partialfields/PartialFieldsParserTest.java
+[9]: https://amsterdam.luminis.eu/2018/08/20/elasticsearch-instances-for-integration-testing/

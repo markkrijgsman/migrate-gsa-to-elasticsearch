@@ -25,7 +25,7 @@ public class QueryVisitor extends GsaQueryParserBaseVisitor<QueryBuilder> {
 
     private static final String TOKEN_OR = "OR";
     private static final String RANGE_REGEX = "\\.\\.";
-    private static final String DOUBLE_REGEX = "-?\\d+\\.\\d+";
+    private static final String NUMBER_REGEX = "\\d+";
 
     private final BooleanConverter booleanConverter;
 
@@ -59,7 +59,7 @@ public class QueryVisitor extends GsaQueryParserBaseVisitor<QueryBuilder> {
         String key = getInmetaKey(ctx.TEXT());
         String value = getInmetaValue(ctx.TEXT());
 
-        if (value.matches(DOUBLE_REGEX + RANGE_REGEX + DOUBLE_REGEX)) {
+        if (value.matches(NUMBER_REGEX + RANGE_REGEX + NUMBER_REGEX)) {
             String[] range = value.split(RANGE_REGEX);
             return new RangeQueryBuilder(key).gte(range[0]).lte(range[1]);
         } else {
