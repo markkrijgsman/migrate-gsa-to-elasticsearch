@@ -1,0 +1,349 @@
+Starting January 1st of 2019, the Google Search Appliance (GSA) is set to be EOL. For one of my clients, we have chosen Elasticsearch as our alternative from 2019 onwards. However, there was one problem; the current GSA solution is in use by several API's that can't be changed for various reasons. Therefore, it was up to us to replicate the GSA's behaviour with the new Elasticsearch implementation and come migration time, to swap out the GSA for Elasticsearch with as little functional changes as possible. 
+
+The GSA provides [a range of functionality][1], some of which is easily implemented with other technologies. In our case, this included of course search functionality, but also other things such as website crawling. The part that I found most interesting however, was the GSA's ability to enable users to form queries based on two small domain specific languages (DSL).
+   
+Queries in these two DSL's reach the GSA as query parameters on the GSA URL. The first DSL, specified with query parameter `q`, has three "modes" of functionality:
+
+ * Free text search, by simply putting some space separated terms
+ * `allintext` search, a search query much like the free text search, but excluding fields such as metadata, anchors and URL's from the search
+ * `inmeta` search, which can potentially [do a lot][2], but in our case was merely restricted to searches on metadata of the form `key=value`.
+ 
+The second DSL, specified with query parameter `partialFields` also provides searching on metadata.
+In this case, searches are of the form `(key:value)` and may be combined with three boolean operators:
+
+* `.`: AND
+* `|`: OR
+* `-`: NOT
+
+An example query could then be `(key1:value1)|(key2.value2)`.
+
+In this blog, I will show you how to implement these two DSL using ANTLR and I will explain how ANTLR enables us to separate the parsing of the DSL from our other application logic.
+ 
+If this is your first time working with ANTLR, you may want to read two posts ([\[1\]][3], [\[2\]][4] that have been posted on our blog earlier.
+
+**If you are looking for the complete implementation, then please refer to the [Github repository][5].**
+
+### Parsing the GSA DSL
+
+Let us start with parsing the `q` DSL. I have split the ANTLR grammar into a separate parser and lexer file for readability. 
+
+The parser is as follows:
+
+    parser grammar GsaQueryParser;
+    
+    options { tokenVocab=GsaQueryLexer; }
+    
+    query   : pair (OR? pair)*  #pairQuery
+            | TEXT+             #freeTextQuery;
+    
+    pair    : IN_META TEXT+                 #inmetaPair
+            | ALL_IN_TEXT TEXT (OR? TEXT)*  #allintextPair;
+
+And the lexer is defined below:
+
+    lexer grammar GsaQueryLexer;
+    
+    ALL_IN_TEXT : 'allintext:';
+    IN_META     : 'inmeta:';
+    
+    OR          : 'OR';
+    
+    TEXT        : ~(' '|'='|':'|'|'|'('|')')+;
+    
+    WHITESPACE  : [ \t\r\n]+ -> skip;
+    IGNORED     : [=:|()]+ -> skip;
+
+Note that the parser grammar reflects the two different ways that the `q` DSL can be used; by specifying pairs or by simply putting a free text query. The pairs can be separated by an OR operator. Furthermore, the `allintext` keyword may separate terms with OR as well. 
+
+The definition of the `partialFields` DSL is somewhat different because it allows for query nesting and more boolean operators. Both the parser and the lexer are shown below, again in two separate files. 
+
+Parser:
+
+    parser grammar GsaPartialFieldsParser;
+    
+    options { tokenVocab=GsaPartialFieldsLexer; }
+    
+    query       : pair
+                | subQuery;
+    
+    subQuery    : LEFTBRACKET subQuery RIGHTBRACKET
+                | pair (AND pair)+
+                | pair (OR pair)+
+                | subQuery (AND subQuery)+
+                | subQuery (OR subQuery)+
+                | subQuery AND pair
+                | subQuery OR pair
+                | pair AND subQuery
+                | pair OR subQuery;
+    
+    pair        : LEFTBRACKET KEYWORD VALUE RIGHTBRACKET        #inclusionPair
+                | LEFTBRACKET NOT KEYWORD VALUE RIGHTBRACKET    #exclusionPair
+                | LEFTBRACKET pair RIGHTBRACKET                 #nestedPair;
+
+Lexer:
+
+    lexer grammar GsaPartialFieldsLexer;
+    
+    AND         : '.';
+    OR          : '|';
+    NOT         : '-';
+    
+    KEYWORD     : [A-z0-9]([A-z0-9]|'-'|'.')*;
+    VALUE       : SEPARATOR~(')')+;
+    
+    SEPARATOR   : [:];
+    LEFTBRACKET : [(];
+    RIGHTBRACKET: [)];
+    WHITESPACE  : [\t\r\n]+ -> skip;
+
+Note the usage of labels in both grammars which, in the above case, allows me to easily distinguish different types of key-value pairs; nested, inclusive or exclusive. Furthermore, there is a gotcha in the matching of the VALUE token. To make a clear distinction between `KEYWORD` and `VALUE` tokens, I've included the `:` as part of a `VALUE` token. 
+
+### Creating the Elasticsearch query 
+
+Now that we have our grammars ready, it's time to use the parse tree generated by ANTLR to construct corresponding Elasticsearch queries. I will post some source code snippets, but make sure to refer to the [complete implementation][5] for all details. 
+
+For both DSL's, I have chosen to walk the tree using the visitor pattern. We will start be reviewing the `q` DSL. 
+
+#### Creating queries from the q DSL
+ 
+The visitor of the `q` DSL extends a `BaseVisitor` generated by ANTLR and will eventually return a `QueryBuilder`, as indicated by the generic type:
+
+    public class QueryVisitor extends GsaQueryParserBaseVisitor<QueryBuilder>
+
+There are three cases that we can distinguish for this DSL: a free text query, an allintext query or an inmeta query. Implementing the free text and allintext query means extracting the `TEXT` token from the tree and then constructing a `MultiMatchQueryBuilder`, e.g.:
+
+    @Override
+    public QueryBuilder visitFreeTextQuery(GsaQueryParser.FreeTextQueryContext ctx) {
+        String text = concatenateValues(ctx.TEXT());
+        return new MultiMatchQueryBuilder(text, "es_field_1", "es_field_2");
+    }
+    
+    private String concatenateValues(List<TerminalNode> textNodes) {
+        return textNodes.stream().map(ParseTree::getText).collect(joining(" "));
+    }
+
+An inmeta query requires us to extract both the field and the value, which we then use to construct a `MatchQueryBuilder`, e.g.:
+
+    @Override
+    public QueryBuilder visitInmetaPair(GsaQueryParser.InmetaPairContext ctx) {
+        List<TerminalNode> textNodes = ctx.TEXT();
+        
+        String key = textNodes.get(0).getText().toLowerCase();
+        textNodes.remove(0);
+        String value = concatenateValues(textNodes);
+        
+        return new MatchQueryBuilder(key, value);
+    }
+
+We can then combine multiple pairs by implementing the `visitPairQuery` method:
+
+    @Override
+    public QueryBuilder visitPairQuery(GsaQueryParser.PairQueryContext ctx) {
+        BoolQueryBuilder result = new BoolQueryBuilder();
+        ctx.pair().forEach(pair -> {
+            QueryBuilder builder = visit(pair);
+            if (hasOrClause(ctx, pair)) {
+                result.should(builder);
+                result.minimumShouldMatch(1);
+            } else {
+                result.must(builder);
+            }
+        });
+        return result;
+    }
+
+#### Creating queries from the partialFields DSL
+
+The visitor of the `partialFields` DSL also extends a `BaseVisitor` generated by ANTLR and will also return a `QueryBuilder`:
+
+    public class PartialFieldsVisitor extends GsaPartialFieldsParserBaseVisitor<QueryBuilder>
+
+
+There are three kinds of pairs that we can specify with this DSL (inclusion, exclusion or nested pair) and we will define a separate method for each. A nested pair is simply unwrapped and then passed back to ANTLR for further processing:
+
+    @Override
+    public QueryBuilder visitNestedPair(GsaPartialFieldsParser.NestedPairContext ctx) {
+        return visit(ctx.pair());
+    } 
+
+
+The inclusion and exclusion query implementations are quite similar to each other:
+
+    @Override
+    public QueryBuilder visitInclusionPair(GsaPartialFieldsParser.InclusionPairContext ctx) {
+        return createQuery(ctx.KEYWORD().getText(), ctx.VALUE().getText(), false);
+    }
+
+    @Override
+    public QueryBuilder visitExclusionPair(GsaPartialFieldsParser.ExclusionPairContext ctx) {
+        return createQuery(ctx.KEYWORD().getText(), ctx.VALUE().getText(), true);
+    }
+    
+    private QueryBuilder createQuery(String key, String value, boolean isExcluded) {       
+        value = value.substring(1);
+        
+        if (isExcluded) {
+            return new BoolQueryBuilder().mustNot(new MatchQueryBuilder(key, value));
+        } else {
+            return new MatchQueryBuilder(key, value).operator(Operator.AND);
+        }
+    }
+
+Remember that we included the `:` to help our token recognition? The method code above is where we need to handle this by taking the substring of the value. What remains is to implement a way to handle to combinations of pairs and boolean operators. This is done by implementing the `visitSubQuery` method and you can view the implementation [here][6]. Based on the presence of an AND or OR operator, we apply must or should clauses, respectively.
+
+### Examples
+
+In my repository, I've included a REST controller that can be used to execute queries using the two DSL's.
+Execute the following steps to follow along with the examples below:
+
+* Start an Elasticsearch instance at <http://localhost:9200>
+* Compile the repository: `mvn clean install`
+* Run the application: `cd target && java -jar search-api.jar`
+* Fill the Elasticsearch instance with some documents: <http://localhost:8080/load>
+* Start searching: <http://localhost:8080/search>
+
+You can also use the Swagger UI to execute some requests: <http://localhost:8080/swagger-ui.html>
+
+**Get all documents mentioning Elton John**
+<http://localhost:8080/search?q=Elton>
+
+    GET rolling500/_search
+    {
+      "query": {
+        "bool": {
+          "must": [
+            {
+              "multi_match": {
+                "query": "Elton",
+                "fields": [
+                  "album",
+                  "artist",
+                  "id",
+                  "information",
+                  "label",
+                  "year"
+                ],
+                "type": "best_fields",
+                "operator": "AND",
+                "lenient": true,
+              }
+            }
+          ]
+        }
+      }
+    }
+
+**Get all documents where Elton John or Frank Sinatra are mentioned**
+<http://localhost:8080/search?q=allintext:Elton%20OR%20Sinatra>
+
+    GET rolling500/_search
+    {
+      "query": {
+        "bool": {
+          "must": [
+            {
+              "bool": {
+                "must": [
+                  {
+                    "multi_match": {
+                      "query": "Elton Sinatra",
+                      "fields": [
+                        "album",
+                        "artist",
+                        "id",
+                        "information",
+                        "label",
+                        "year"
+                      ],
+                      "type": "best_fields",
+                      "operator": "OR",
+                      "lenient": true
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      }
+    }
+
+Note that the operator for the multi match query is now OR, where it was AND in the previous example.
+
+**Get all documents where the artist is Elton John**
+<http://localhost:8080/search?partialFields=(artist:Elton)>
+
+    GET rolling500/_search
+    {
+      "query": {
+        "bool": {
+          "must": [
+            {
+              "match": {
+                "artist": {
+                  "query": "Elton",
+                  "operator": "AND"
+                }
+              }
+            }
+          ]
+        }
+      }
+    }
+
+**Get all documents where Elton John is mentioned, but is not the artist**
+<http://localhost:8080/search?partialFields=(-artist:Elton)&q=Elton>
+
+    GET rolling500/_search
+    {
+      "query": {
+        "bool": {
+          "must": [
+            {
+              "bool": {
+                "must_not": [
+                  {
+                    "match": {
+                      "artist": {
+                        "query": "Elton",
+                        "operator": "OR"
+                      }
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "multi_match": {
+                "query": "Elton",
+                "fields": [
+                  "album",
+                  "artist",
+                  "id",
+                  "information",
+                  "label",
+                  "year"
+                ],
+                "type": "best_fields",
+                "operator": "AND",
+                "lenient": true
+              }
+            }
+          ]
+        }
+      }
+    }
+
+### Conclusions
+
+As you can see, the usage of ANTLR allows us to specify fairly complex DSL's without compromising readability. We've cleanly separated the parsing of a user query from the actual construction of the resulting Elasticsearch query. All code is easily testable and makes little to no use of hard to understand regular expressions. 
+
+A good addition would be to add some integration tests to your implementation, which you can learn more about [here][7]. If you have any questions or comments, let me know! 
+
+[1]: https://www.google.com/support/enterprise/static/gsa/docs/admin/current/gsa_doc_set/xml_reference/index.html
+[2]: https://www.google.com/support/enterprise/static/gsa/docs/admin/current/gsa_doc_set/xml_reference/request_format.html#1077914
+[3]: https://amsterdam.luminis.eu/2017/06/28/creating-search-dsl
+[4]: https://amsterdam.luminis.eu/2017/07/21/creating-search-dsl-part-2
+[5]: https://github.com/markkrijgsman/migrate-gsa-to-elasticsearch
+[6]: https://github.com/markkrijgsman/migrate-gsa-to-elasticsearch/tree/master/src/main/java/nl/luminis/blog/gsa/dsl/partialfields/PartialFieldsVisitor.java
+[7]: https://amsterdam.luminis.eu/2018/08/20/elasticsearch-instances-for-integration-testing/
