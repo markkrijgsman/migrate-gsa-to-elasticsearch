@@ -15,7 +15,7 @@ In this case, searches are of the form `(key:value)` and may be combined with th
 * `|`: OR
 * `-`: NOT
 
-An example query could then be `(key1:value1)|(key2.value2)`.
+An example query could then be `(key1:value1)|(key2:value2)`.
 
 In this blog, I will explain how to implement these two DSL's using ANTLR and I will show you how ANTLR enables us to separate the parsing of the DSL from our other application logic.
  
